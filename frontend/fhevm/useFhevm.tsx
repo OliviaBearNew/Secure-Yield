@@ -1,7 +1,15 @@
 import { ethers } from "ethers";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { FhevmInstance } from "./fhevmTypes";
 import { createFhevmInstance } from "./internal/fhevm";
+
+function _assert(condition: boolean, message?: string): asserts condition {
+  if (!condition) {
+    const m = message ? `Assertion failed: ${message}` : `Assertion failed.`;
+    console.error(m);
+    throw new Error(m);
+  }
+}
 
 export type FhevmGoState = "idle" | "loading" | "ready" | "error";
 
@@ -9,22 +17,141 @@ export function useFhevm(parameters: {
   provider: string | ethers.Eip1193Provider | undefined;
   chainId: number | undefined;
   enabled?: boolean;
-}): { instance: FhevmInstance | undefined; error: Error | undefined; status: FhevmGoState; refresh: () => void } {
-  const { provider, enabled = true } = parameters;
-  const [instance, setInstance] = useState<FhevmInstance | undefined>(undefined);
-  const [error, setError] = useState<Error | undefined>(undefined);
-  const [status, setStatus] = useState<FhevmGoState>("idle");
-  const [tick, setTick] = useState(0);
+  initialMockChains?: Readonly<Record<number, string>>;
+}): {
+  instance: FhevmInstance | undefined;
+  refresh: () => void;
+  error: Error | undefined;
+  status: FhevmGoState;
+} {
+  const { provider, chainId, initialMockChains, enabled = true } = parameters;
+
+  const [instance, _setInstance] = useState<FhevmInstance | undefined>(
+    undefined
+  );
+  const [status, _setStatus] = useState<FhevmGoState>("idle");
+  const [error, _setError] = useState<Error | undefined>(undefined);
+  const [_isRunning, _setIsRunning] = useState<boolean>(enabled);
+  const [_providerChanged, _setProviderChanged] = useState<number>(0);
+  const _abortControllerRef = useRef<AbortController | null>(null);
+  const _providerRef = useRef<string | ethers.Eip1193Provider | undefined>(
+    provider
+  );
+  const _chainIdRef = useRef<number | undefined>(chainId);
+  const _mockChainsRef = useRef<Record<number, string> | undefined>(
+    initialMockChains as Record<number, string> | undefined
+  );
+
+  const refresh = useCallback(() => {
+    if (_abortControllerRef.current) {
+      _providerRef.current = undefined;
+      _chainIdRef.current = undefined;
+      _abortControllerRef.current.abort();
+      _abortControllerRef.current = null;
+    }
+
+    _providerRef.current = provider;
+    _chainIdRef.current = chainId;
+
+    _setInstance(undefined);
+    _setError(undefined);
+    _setStatus("idle");
+
+    if (provider !== undefined) {
+      _setProviderChanged((prev) => prev + 1);
+    }
+  }, [provider, chainId]);
 
   useEffect(() => {
-    if (!enabled || !provider) { setInstance(undefined); setError(undefined); setStatus("idle"); return; }
-    const ac = new AbortController();
-    setStatus("loading");
-    createFhevmInstance({ provider: provider as any, signal: ac.signal })
-      .then((i) => { if (!ac.signal.aborted) { setInstance(i); setStatus("ready"); } })
-      .catch((e) => { if (!ac.signal.aborted) { setError(e); setStatus("error"); } });
-    return () => ac.abort();
-  }, [enabled, provider, tick]);
+    refresh();
+  }, [refresh]);
 
-  return { instance, error, status, refresh: () => setTick((t) => t + 1) };
+  useEffect(() => {
+    _setIsRunning(enabled);
+  }, [enabled]);
+
+  useEffect(() => {
+    if (_isRunning === false) {
+      console.log("cancelled");
+      if (_abortControllerRef.current) {
+        _abortControllerRef.current.abort();
+        _abortControllerRef.current = null;
+      }
+      _setInstance(undefined);
+      _setError(undefined);
+      _setStatus("idle");
+      return;
+    }
+
+    if (_isRunning === true) {
+      if (_providerRef.current === undefined) {
+        _setInstance(undefined);
+        _setError(undefined);
+        _setStatus("idle");
+        return;
+      }
+
+      if (!_abortControllerRef.current) {
+        _abortControllerRef.current = new AbortController();
+      }
+
+      _assert(
+        !_abortControllerRef.current.signal.aborted,
+        "!controllerRef.current.signal.aborted"
+      );
+
+      _setStatus("loading");
+      _setError(undefined);
+
+      const thisSignal = _abortControllerRef.current.signal;
+      const thisProvider = _providerRef.current;
+      const thisRpcUrlsByChainId = _mockChainsRef.current;
+
+      createFhevmInstance({
+        signal: thisSignal,
+        provider: thisProvider as ethers.Eip1193Provider,
+        mockChains: thisRpcUrlsByChainId,
+        onStatusChange: (s) =>
+          console.log(`[useFhevm] createFhevmInstance status changed: ${s}`),
+      })
+        .then((i) => {
+          console.log(`[useFhevm] createFhevmInstance created!`);
+          if (thisSignal.aborted) return;
+          _assert(
+            thisProvider === _providerRef.current,
+            "thisProvider === _providerRef.current"
+          );
+          _setInstance(i);
+          _setError(undefined);
+          _setStatus("ready");
+        })
+        .catch((e) => {
+          // FhevmAbortError is expected when operations are cancelled (e.g., React strict mode double render)
+          // Don't log it as an error, just debug info
+          if (e.name === "FhevmAbortError" || thisSignal.aborted) {
+            console.log(`[useFhevm] FHEVM operation was cancelled (this is normal in React strict mode)`);
+            return;
+          }
+          
+          // Log real errors
+          console.error(`[useFhevm] Error creating FHEVM instance:`, e);
+          console.error(`[useFhevm] Error name: ${e.name}`);
+          console.error(`[useFhevm] Error message: ${e.message}`);
+          console.error(`[useFhevm] Error stack:`, e.stack);
+          if (e.code) {
+            console.error(`[useFhevm] Error code: ${e.code}`);
+          }
+          if (thisSignal.aborted) return;
+          _assert(
+            thisProvider === _providerRef.current,
+            "thisProvider === _providerRef.current"
+          );
+          _setInstance(undefined);
+          _setError(e);
+          _setStatus("error");
+        });
+    }
+  }, [_isRunning, _providerChanged]);
+
+  return { instance, refresh, error, status };
 }
