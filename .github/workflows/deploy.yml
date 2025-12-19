@@ -34,10 +34,6 @@ jobs:
         working-directory: ./frontend
         run: npm ci
 
-      - name: Generate ABI
-        working-directory: ./frontend
-        run: npm run genabi
-
       - name: Determine basePath
         id: basepath
         run: |
