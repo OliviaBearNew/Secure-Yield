@@ -13,7 +13,7 @@ type ClearValueType = { handle: string; clear: string | bigint | boolean };
 function getDappByChainId(chainId: number | undefined) {
   if (!chainId) return { abi: SecureYieldCalculatorABI.abi } as const;
   const entry = SecureYieldCalculatorAddresses[chainId.toString() as keyof typeof SecureYieldCalculatorAddresses];
-  if (!("address" in entry) || entry.address === ethers.ZeroAddress) return { abi: SecureYieldCalculatorABI.abi, chainId } as const;
+  if (!entry || !("address" in entry) || entry.address === ethers.ZeroAddress) return { abi: SecureYieldCalculatorABI.abi, chainId } as const;
   return { address: entry?.address as `0x${string}` | undefined, chainId: entry?.chainId ?? chainId, chainName: entry?.chainName, abi: SecureYieldCalculatorABI.abi } as const;
 }
 
