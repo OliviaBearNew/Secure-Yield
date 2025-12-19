@@ -71,6 +71,48 @@ type FhevmRelayerStatusType =
   | "sdk-initialized"
   | "creating";
 
+type RelayerSdkConfigEntry = {
+  name: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  cfg: any;
+};
+
+function getSdkConfigs(relayerSDK: unknown): RelayerSdkConfigEntry[] {
+  if (!relayerSDK || typeof relayerSDK !== "object") return [];
+  const rs: any = relayerSDK as any;
+  return [
+    { name: "ZamaEthereumConfig", cfg: rs.ZamaEthereumConfig },
+    { name: "SepoliaConfig", cfg: rs.SepoliaConfig },
+  ].filter((e) => Boolean(e.cfg));
+}
+
+function formatSupportedChains(configs: RelayerSdkConfigEntry[]): string {
+  const ids = configs
+    .map((c) => (typeof c.cfg?.chainId === "number" ? c.cfg.chainId : undefined))
+    .filter((x): x is number => typeof x === "number");
+  if (ids.length === 0) return "unknown";
+  return ids.join(", ");
+}
+
+function pickSdkConfigForChain(
+  relayerSDK: unknown,
+  chainId: number
+): RelayerSdkConfigEntry | undefined {
+  const configs = getSdkConfigs(relayerSDK);
+  // Prefer explicit chainId match if available.
+  const byId = configs.find(
+    (c) => typeof c.cfg?.chainId === "number" && c.cfg.chainId === chainId
+  );
+  if (byId) return byId;
+
+  // Fallback for older SDK objects that may not expose cfg.chainId.
+  // This is intentionally conservative to avoid selecting the wrong config.
+  if (chainId === 11155111) {
+    return configs.find((c) => c.name === "SepoliaConfig");
+  }
+  return undefined;
+}
+
 async function getChainId(
   providerOrUrl: Eip1193Provider | string
 ): Promise<number> {
@@ -180,6 +222,10 @@ export const createFhevmInstance = async (parameters: {
       throwIfAborted();
       return mockInstance;
     }
+    throwFhevmError(
+      "LOCAL_NODE_UNAVAILABLE",
+      `Local FHEVM node was not detected at ${rpcUrl}. Please start an FHEVM Hardhat node and try again.`
+    );
   }
 
   throwIfAborted();
@@ -199,11 +245,17 @@ export const createFhevmInstance = async (parameters: {
   }
 
   const relayerSDK = (window as unknown as FhevmWindowType).relayerSDK;
-  const sdkConfig = relayerSDK.ZamaEthereumConfig || (relayerSDK as any).SepoliaConfig;
-  if (!sdkConfig) {
-    throw new Error("RelayerSDK: Neither ZamaEthereumConfig nor SepoliaConfig is available");
+  const picked = pickSdkConfigForChain(relayerSDK, chainId);
+  if (!picked) {
+    const supported = formatSupportedChains(getSdkConfigs(relayerSDK));
+    throwFhevmError(
+      "UNSUPPORTED_CHAIN",
+      `Unsupported network (chainId=${chainId}). Please switch your wallet to a supported network (e.g. ${supported}).`
+    );
   }
-  const aclAddress = sdkConfig.aclContractAddress;
+
+  const sdkConfig = picked.cfg as FhevmInstanceConfig;
+  const aclAddress = (sdkConfig as any).aclContractAddress;
   if (!checkIsAddress(aclAddress)) {
     throw new Error(`Invalid address: ${aclAddress}`);
   }
@@ -211,12 +263,27 @@ export const createFhevmInstance = async (parameters: {
   const config: FhevmInstanceConfig = {
     ...sdkConfig,
     network: providerOrUrl as any,
-    publicKey: sdkConfig.publicKey,
-    publicParams: sdkConfig.publicParams,
+    publicKey: (sdkConfig as any).publicKey,
+    publicParams: (sdkConfig as any).publicParams,
   } as any;
 
   notify("creating");
-  const instance = await relayerSDK.createInstance(config);
+  let instance: FhevmInstance;
+  try {
+    instance = await relayerSDK.createInstance(config);
+  } catch (e: any) {
+    const msg = String(e?.message ?? e);
+    const code = String(e?.code ?? "");
+    if (code === "BAD_DATA" || msg.includes("getKmsSigners")) {
+      const supported = formatSupportedChains(getSdkConfigs(relayerSDK));
+      throwFhevmError(
+        "RELAYER_UNAVAILABLE",
+        `FHEVM Relayer is not available on chainId=${chainId}. Please switch your wallet to a supported network (e.g. ${supported}) and try again.`,
+        e
+      );
+    }
+    throw e;
+  }
   throwIfAborted();
   return instance;
 };
